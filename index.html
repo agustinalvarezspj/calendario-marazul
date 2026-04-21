@@ -35,7 +35,7 @@ body{font-family:'Sora',sans-serif;background:var(--sand);color:var(--ink);min-h
 .topbar{background:var(--navy);padding:0 20px;height:54px;display:flex;align-items:center;gap:12px;position:sticky;top:0;z-index:300}
 .tb-brand{font-family:'DM Serif Display',serif;font-size:17px;color:white;margin-right:auto;display:flex;align-items:center;gap:8px}
 .tb-brand span{color:#5dade2;font-family:'Sora',sans-serif;font-size:12px;font-weight:300}
-.sync-dot{width:7px;height:7px;border-radius:50%;flex-shrink:0}
+.sync-dot{width:7px;height:7px;border-radius:50%;flex-shrink:0;background:transparent}
 .sync-dot.ok{background:#4ade80}
 .sync-dot.loading{background:#facc15;animation:pulse .8s infinite}
 .sync-dot.err{background:#f87171}
@@ -373,13 +373,44 @@ function setSyncState(s){
 }
 function isApi(){ return API_URL && API_URL!=='TU_URL_DE_APPS_SCRIPT_AQUI'; }
 
+function jsonp(url) {
+  return new Promise((resolve, reject) => {
+    const cb = 'cb_' + Date.now() + '_' + Math.random().toString(36).slice(2);
+    const script = document.createElement('script');
+    window[cb] = (data) => {
+      delete window[cb];
+      document.body.removeChild(script);
+      resolve(data);
+    };
+    script.onerror = () => {
+      delete window[cb];
+      document.body.removeChild(script);
+      reject(new Error('JSONP error'));
+    };
+    script.src = url + '&callback=' + cb;
+    document.body.appendChild(script);
+    setTimeout(() => {
+      if (window[cb]) {
+        delete window[cb];
+        try { document.body.removeChild(script); } catch(e) {}
+        reject(new Error('JSONP timeout'));
+      }
+    }, 10000);
+  });
+}
+
 async function fetchEntries(y,m){
   if(!isApi()){setSyncState('ok');const r=localStorage.getItem('cal_'+monthKey(y,m));return r?JSON.parse(r):{};}
   setSyncState('loading');
   try{
-    const res=await fetch(`${API_URL}?action=getEntries&monthKey=${monthKey(y,m)}`);
-    const data=await res.json();setSyncState('ok');return data.entries||{};
-  }catch(e){setSyncState('err');const r=localStorage.getItem('cal_'+monthKey(y,m));return r?JSON.parse(r):{};}
+    const data=await jsonp(`${API_URL}?action=getEntries&monthKey=${monthKey(y,m)}`);
+    setSyncState('ok');
+    return data.entries||{};
+  }catch(e){
+    setSyncState('err');
+    const r=localStorage.getItem('cal_'+monthKey(y,m));
+    return r?JSON.parse(r):{};
+  }
 }
 
 async function persistDay(dk, items){
@@ -392,8 +423,8 @@ async function persistDay(dk, items){
   setSyncState('loading');
   try{
     const params=new URLSearchParams({action:'saveDay',data:JSON.stringify({dateKey:dk,items,monthKey:mk})});
-    const res=await fetch(`${API_URL}?${params.toString()}`);
-    const data=await res.json();setSyncState('ok');return data;
+    const data=await jsonp(`${API_URL}?${params.toString()}`);
+    setSyncState('ok');return data;
   }catch(e){setSyncState('err');return{error:e.toString()};}
 }
 
@@ -407,8 +438,19 @@ function startPolling(){
   if(pollInterval)clearInterval(pollInterval);
   if(!isApi())return;
   pollInterval=setInterval(async()=>{
-    const fresh=await fetchEntries(curYear,curMonth);
-    if(JSON.stringify(fresh)!==JSON.stringify(entries)){entries=fresh;renderCurrentView();}
+    try {
+      const fresh=await fetchEntries(curYear,curMonth);
+      // Solo actualizar si la API devolvió datos reales (no vacío por error CORS)
+      const hasRemoteData = Object.keys(fresh).length > 0;
+      const hasLocalData  = Object.keys(entries).length > 0;
+      // Si tenemos datos locales y la API devuelve vacío, NO sobreescribir
+      if(hasLocalData && !hasRemoteData) return;
+      if(JSON.stringify(fresh)!==JSON.stringify(entries)){
+        entries=fresh;
+        localStorage.setItem('cal_'+monthKey(curYear,curMonth),JSON.stringify(entries));
+        renderCurrentView();
+      }
+    } catch(e) { /* ignorar errores de polling */ }
   },10000);
 }
 
@@ -428,6 +470,7 @@ function doLogin(id){
   localStorage.setItem('cal_user',id);
   document.getElementById('loginWrap').style.display='none';
   document.getElementById('appWrap').style.display='block';
+  setSyncState('loading');
   const av=document.getElementById('topAvatar');
   av.style.background=me.color;av.textContent=me.name[0];
   document.getElementById('topName').textContent=me.name;
